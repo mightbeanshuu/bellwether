@@ -29,14 +29,33 @@ cat > "$LAUNCHER" <<EOF
 exec "$VENV/bin/python" -m bellwether "\$@"
 EOF
 chmod +x "$LAUNCHER"
-
 echo "  • launcher installed at $LAUNCHER"
+
+# 3) make sure BIN_DIR is on PATH, persisting to the right shell profile
+NEEDS_SOURCE=""
+case ":$PATH:" in
+  *":$BIN_DIR:"*) : ;;  # already on PATH
+  *)
+    case "$(basename "${SHELL:-/bin/zsh}")" in
+      zsh)  RC="$HOME/.zshrc" ;;
+      bash) RC="$HOME/.bashrc" ;;
+      *)    RC="$HOME/.profile" ;;
+    esac
+    LINE="export PATH=\"$BIN_DIR:\$PATH\""
+    if [ ! -f "$RC" ] || ! grep -qF "$BIN_DIR" "$RC"; then
+      printf '\n# Added by Bellwether installer\n%s\n' "$LINE" >> "$RC"
+      echo "  • added $BIN_DIR to PATH in $RC"
+    fi
+    NEEDS_SOURCE="$RC"
+    ;;
+esac
+
 echo
-if ! command -v bellwether >/dev/null 2>&1; then
-  echo "⚠️  $BIN_DIR is not on your PATH. Add this to your shell profile:"
-  echo "     export PATH=\"$BIN_DIR:\$PATH\""
-  echo
-fi
 echo "✅ Done. Try:  bellwether            (instant crypto scan)"
 echo "             bellwether live        (auto-refreshing dashboard)"
 echo "             bellwether scan --source yahoo NVDA AAPL"
+if [ -n "$NEEDS_SOURCE" ]; then
+  echo
+  echo "👉 Activate it in THIS terminal now:   source $NEEDS_SOURCE"
+  echo "   (new terminal windows will pick it up automatically)"
+fi

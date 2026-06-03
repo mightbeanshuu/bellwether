@@ -51,8 +51,9 @@ def _build_parser() -> argparse.ArgumentParser:
 
     lv = sub.add_parser("live", help="auto-refreshing live dashboard")
     _add_scan_args(lv)
-    lv.add_argument("--every", type=int, default=30, help="refresh interval in seconds")
-    lv.add_argument("--apply", action="store_true", help="apply signals each refresh")
+    lv.add_argument("--tick", type=int, default=3, help="live price refresh interval in seconds")
+    lv.add_argument("--every", type=int, default=30, help="full indicator rescan interval in seconds")
+    lv.add_argument("--apply", action="store_true", help="apply signals each rescan")
 
     sub.add_parser("status", help="show the paper portfolio")
 
@@ -86,9 +87,12 @@ def _do_scan(args, state_path: Path):
 def _do_live(args, state_path: Path):
     from rich.live import Live
 
+    from . import data
     from .dashboard import build, console
 
     tickers, interval = _resolve(args)
+    tick = max(1, args.tick)
+    every = max(tick, args.every)
 
     def _scan():
         pf = Portfolio.load(state_path)
@@ -100,17 +104,29 @@ def _do_live(args, state_path: Path):
             pf.save(state_path)
         return result
 
-    console.print(f"[dim]Live dashboard — refreshing every {args.every}s. Ctrl-C to exit.[/dim]")
+    console.print(
+        f"[dim]Live dashboard — prices every {tick}s, full rescan every {every}s. Ctrl-C to exit.[/dim]"
+    )
+    prev: dict[str, float] = {}
     try:
         if console.is_terminal:
             with Live(console=console, screen=True, auto_refresh=False) as live:
+                result = _scan()
+                last_scan = time.monotonic()
                 while True:
-                    live.update(build(_scan()), refresh=True)
-                    time.sleep(max(5, args.every))
+                    if time.monotonic() - last_scan >= every:
+                        result = _scan()
+                        last_scan = time.monotonic()
+                    else:
+                        # Cheap tick: refresh only live quotes between rescans.
+                        result.quotes = data.quotes(tickers, source=args.source) or result.quotes
+                    live.update(build(result, prev), refresh=True)
+                    prev = {s: q.last for s, q in result.quotes.items()}
+                    time.sleep(tick)
         else:  # piped / non-interactive: plain repeated render
             while True:
                 console.print(build(_scan()))
-                time.sleep(max(5, args.every))
+                time.sleep(every)
     except KeyboardInterrupt:
         console.print("[dim]Live dashboard stopped.[/dim]")
 

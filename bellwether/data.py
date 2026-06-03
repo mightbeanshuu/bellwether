@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import urllib.parse
 import urllib.request
+from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import pandas as pd
@@ -168,3 +169,73 @@ def fetch(
 
 def latest_price(df: pd.DataFrame) -> float:
     return float(df["Close"].iloc[-1])
+
+
+# --------------------------------------------------------------------------
+# Live quotes (lightweight, for the real-time ticker strip)
+# --------------------------------------------------------------------------
+@dataclass
+class Quote:
+    symbol: str
+    last: float
+    open_24h: float = 0.0
+    high: float = 0.0
+    low: float = 0.0
+    volume: float = 0.0
+
+    @property
+    def change_pct(self) -> float:
+        return (self.last - self.open_24h) / self.open_24h if self.open_24h else 0.0
+
+
+def _coinex_quotes(symbols: list[str], segment: str) -> dict[str, Quote]:
+    try:
+        payload = _http_get_json(f"/{segment}/ticker", {"market": ",".join(symbols)})
+    except DataGap:
+        return {}
+    out: dict[str, Quote] = {}
+    for r in payload.get("data", []):
+        try:
+            out[r["market"]] = Quote(
+                symbol=r["market"],
+                last=float(r["last"]),
+                open_24h=float(r.get("open") or 0),
+                high=float(r.get("high") or 0),
+                low=float(r.get("low") or 0),
+                volume=float(r.get("volume") or 0),
+            )
+        except (KeyError, ValueError, TypeError):
+            continue
+    return out
+
+
+def _yahoo_quotes(symbols: list[str]) -> dict[str, Quote]:
+    yf = _import_yfinance()
+    out: dict[str, Quote] = {}
+    for sym in symbols:
+        try:
+            fi = yf.Ticker(sym).fast_info
+            last = float(fi.get("last_price") or fi.get("lastPrice") or 0)
+            prev = float(fi.get("previous_close") or fi.get("previousClose") or last)
+            if not last:
+                continue
+            out[sym] = Quote(
+                symbol=sym, last=last, open_24h=prev,
+                high=float(fi.get("day_high") or 0), low=float(fi.get("day_low") or 0),
+                volume=float(fi.get("last_volume") or 0),
+            )
+        except Exception:
+            continue
+    return out
+
+
+def quotes(symbols: list[str], source: str = "coinex") -> dict[str, Quote]:
+    """Fast last-price quotes (+24h change) for a live ticker. Best-effort: a
+    failed feed yields an empty/partial map rather than raising."""
+    if source in ("coinex", "coinex-futures"):
+        return _coinex_quotes(symbols, "futures")
+    if source == "coinex-spot":
+        return _coinex_quotes(symbols, "spot")
+    if source == "yahoo":
+        return _yahoo_quotes(symbols)
+    return {}

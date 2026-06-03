@@ -29,6 +29,7 @@ class AssetReport:
     signal: Signal | None = None
     sizing: SizingResult | None = None
     filled: str | None = None  # note about any paper fill/close
+    change_pct: float = 0.0    # 24h change
 
 
 @dataclass
@@ -41,6 +42,7 @@ class ScanResult:
     source: str = "yahoo"
     interval: str = "1d"
     unit_label: str = "SHARES"
+    quotes: dict = field(default_factory=dict)  # symbol -> data.Quote (live)
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"))
 
 
@@ -88,6 +90,8 @@ def run_scan(
         except DataGap as exc:
             errors[tk] = str(exc)
 
+    quote_map = data.quotes(tickers, source=source)
+
     pf.roll_day_if_needed(prices)
     exit_logs = _manage_open_positions(pf, prices, fmt_price) if apply_trades else []
 
@@ -126,9 +130,11 @@ def run_scan(
             pnl = pf.close_position(tk, prices[tk])
             filled = f"CLOSED {tk} @ {fmt_price(prices[tk])} | realized ${pnl:,.2f}"
 
+        q = quote_map.get(tk)
         reports.append(AssetReport(
             tk, ok=True, price=prices[tk], regime=reg,
             signal=effective, sizing=sizing, filled=filled,
+            change_pct=q.change_pct if q else 0.0,
         ))
 
     return ScanResult(
@@ -140,4 +146,5 @@ def run_scan(
         source=source,
         interval=interval,
         unit_label=unit_label,
+        quotes=quote_map,
     )

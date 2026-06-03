@@ -74,6 +74,37 @@ def _clamp(x, lo=-1.0, hi=1.0):
 # --------------------------------------------------------------------------
 # Header
 # --------------------------------------------------------------------------
+def _pct(p: float) -> str:
+    return f"{'+' if p >= 0 else ''}{p*100:.2f}%"
+
+
+def ticker_strip(quotes: dict, prev_prices: dict | None = None) -> Panel:
+    """A live price ribbon. Each cell flashes green/red on a tick vs prev_prices;
+    when no prev is given (one-shot scan) it colors by the 24h change sign."""
+    prev_prices = prev_prices or {}
+    cells = []
+    for sym, q in quotes.items():
+        prev = prev_prices.get(sym)
+        if prev is not None and q.last != prev:
+            price_style = "bold green" if q.last > prev else "bold red"
+            arrow = "▲" if q.last > prev else "▼"
+        else:
+            price_style = "bold green" if q.change_pct >= 0 else "bold red"
+            arrow = "▲" if q.change_pct >= 0 else "▼"
+        chg_style = "green" if q.change_pct >= 0 else "red"
+
+        cell = Text(justify="center")
+        cell.append(f"{sym}\n", style="bold white")
+        cell.append(f"{arrow} {fmt_price(q.last)}\n", style=price_style)
+        cell.append(_pct(q.change_pct), style=chg_style)
+        cells.append(cell)
+
+    if not cells:
+        cells = [Text("waiting for live quotes…", style="dim italic")]
+    return Panel(Columns(cells, equal=True, expand=True), title="● LIVE", title_align="left",
+                 box=ROUNDED, border_style="green", padding=(0, 1))
+
+
 def header_panel(result) -> Panel:
     pnl = result.daily_pnl_pct
     pnl_style = "green" if pnl >= 0 else "red"
@@ -101,6 +132,7 @@ def summary_table(result) -> Table:
     t = Table(box=ROUNDED, expand=True, border_style="grey37", header_style="bold white on grey23")
     t.add_column("Ticker", style="bold", no_wrap=True)
     t.add_column("Price", justify="right")
+    t.add_column("24h", justify="right")
     t.add_column("Regime")
     t.add_column("Signal", justify="center")
     t.add_column("Score", justify="center")
@@ -109,7 +141,7 @@ def summary_table(result) -> Table:
 
     for r in result.reports:
         if not r.ok:
-            t.add_row(r.ticker, "—", Text("DATA_GAP", style="bold red"),
+            t.add_row(r.ticker, "—", "—", Text("DATA_GAP", style="bold red"),
                       Text("SKIP", style="dim"), "—", "—", "—")
             continue
         sig = r.signal
@@ -117,9 +149,11 @@ def summary_table(result) -> Table:
         regime_txt = Text(r.regime.label, style="white")
         regime_txt.append(f"\nADX {r.regime.adx:.0f} · ATR {r.regime.atr_pct*100:.2f}%", style="dim")
         conv = f"{_conviction_bar(sig.conviction)} {sig.conviction*100:.0f}%"
+        chg_style = "green" if r.change_pct >= 0 else "red"
         t.add_row(
             r.ticker,
             fmt_price(r.price),
+            Text(_pct(r.change_pct), style=chg_style),
             regime_txt,
             Text(ACTION_ICON[sig.action], style=act_style),
             _score_bar(sig.score),
@@ -180,8 +214,10 @@ def detail_panel(r, unit_label: str) -> Panel:
 # --------------------------------------------------------------------------
 # Top-level render
 # --------------------------------------------------------------------------
-def build(result) -> Group:
+def build(result, prev_prices: dict | None = None) -> Group:
     parts = [header_panel(result)]
+    if result.quotes:
+        parts.append(ticker_strip(result.quotes, prev_prices))
     if result.frozen:
         parts.append(Panel(
             Text("CIRCUIT BREAKER TRIGGERED — daily loss limit breached. "

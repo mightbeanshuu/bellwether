@@ -35,7 +35,8 @@ Then it's just:
 
 ```bash
 bellwether                              # default: scan top crypto on CoinEx
-bellwether live                         # auto-refreshing dashboard (Ctrl-C to quit)
+bellwether live                         # LIVE dashboard: prices tick every ~3s, full rescan every 30s
+bellwether live --tick 2 --every 20     # tune the live price + rescan cadence
 bellwether scan --source coinex BTCUSDT ETHUSDT SOLUSDT
 bellwether scan --source yahoo NVDA AAPL MSFT SPY     # stocks
 bellwether scan --apply BTCUSDT         # apply signals to the paper portfolio
