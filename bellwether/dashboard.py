@@ -214,8 +214,48 @@ def detail_panel(r, unit_label: str) -> Panel:
 # --------------------------------------------------------------------------
 # Top-level render
 # --------------------------------------------------------------------------
+def account_panel(account: dict) -> Panel:
+    if account.get("error"):
+        return Panel(Text(f"🔐 account not connected: {account['error']}", style="yellow"),
+                     box=ROUNDED, border_style="yellow", padding=(0, 1))
+
+    bal = Table.grid(padding=(0, 2))
+    bal.add_column(style="bold cyan")
+    bal.add_column(justify="right", style="white")
+    bal.add_column(justify="right", style="dim")
+    bal.add_row("CCY", "available", "frozen")
+    for b in account.get("balances", [])[:6]:
+        bal.add_row(str(b.get("ccy", "?")),
+                    f"{float(b.get('available') or 0):,.4f}",
+                    f"{float(b.get('frozen') or 0):,.4f}")
+
+    positions = account.get("positions", [])
+    if positions:
+        pos = Table(box=SIMPLE, header_style="dim", expand=True)
+        for c in ("Market", "Side", "Size", "Entry", "uPnL"):
+            pos.add_column(c)
+        for p in positions[:8]:
+            side = str(p.get("side", "")).upper()
+            upnl = float(p.get("unrealized_pnl") or p.get("unrealised_pnl") or 0)
+            pos.add_row(
+                str(p.get("market", "?")), Text(side, style="green" if side == "LONG" else "red"),
+                str(p.get("amount") or p.get("position_amount") or "—"),
+                str(p.get("avg_entry_price") or p.get("entry_price") or "—"),
+                Text(f"{upnl:,.2f}", style="green" if upnl >= 0 else "red"),
+            )
+        body = Columns([Panel(bal, title="balances", box=ROUNDED, border_style="cyan"),
+                        Panel(pos, title="open positions", box=ROUNDED, border_style="cyan")], expand=True)
+    else:
+        body = Panel(bal, title="balances", box=ROUNDED, border_style="cyan")
+
+    return Panel(body, title=Text("🔐 LIVE ACCOUNT (read-only)", style="bold cyan"),
+                 box=ROUNDED, border_style="cyan", padding=(0, 1))
+
+
 def build(result, prev_prices: dict | None = None) -> Group:
     parts = [header_panel(result)]
+    if result.account is not None:
+        parts.append(account_panel(result.account))
     if result.quotes:
         parts.append(ticker_strip(result.quotes, prev_prices))
     if result.frozen:

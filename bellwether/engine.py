@@ -43,6 +43,7 @@ class ScanResult:
     interval: str = "1d"
     unit_label: str = "SHARES"
     quotes: dict = field(default_factory=dict)  # symbol -> data.Quote (live)
+    account: dict | None = None                 # real account snapshot when connected
     timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC"))
 
 
@@ -71,6 +72,7 @@ def run_scan(
     base_risk: float = risk.BASE_RISK_RATIO,
     source: str = "yahoo",
     bars: int = 500,
+    use_account: bool = False,
 ) -> ScanResult:
     """Run one full scan pass and return a structured ScanResult."""
     from .dashboard import fmt_price  # local import avoids a cycle at module load
@@ -94,6 +96,11 @@ def run_scan(
 
     pf.roll_day_if_needed(prices)
     exit_logs = _manage_open_positions(pf, prices, fmt_price) if apply_trades else []
+
+    account = None
+    if use_account:
+        from . import auth
+        account = auth.account_snapshot()
 
     daily_pnl = pf.daily_pnl_pct(prices)
     frozen = risk.circuit_breaker_tripped(daily_pnl)
@@ -137,8 +144,12 @@ def run_scan(
             change_pct=q.change_pct if q else 0.0,
         ))
 
+    portfolio_value = pf.market_value(prices)
+    if account and not account.get("error") and account.get("equity_usdt"):
+        portfolio_value = account["equity_usdt"]
+
     return ScanResult(
-        portfolio_value=pf.market_value(prices),
+        portfolio_value=portfolio_value,
         daily_pnl_pct=daily_pnl,
         frozen=frozen,
         reports=reports,
@@ -147,4 +158,5 @@ def run_scan(
         interval=interval,
         unit_label=unit_label,
         quotes=quote_map,
+        account=account,
     )

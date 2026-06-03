@@ -34,6 +34,8 @@ def _add_scan_args(p: argparse.ArgumentParser) -> None:
                    help="bar interval (1d, 4h, 1h, 15m, 5m...); default 1d stocks / 15m crypto")
     p.add_argument("--bars", type=int, default=500, help="[coinex] number of bars to pull (<=1000)")
     p.add_argument("--risk", type=float, default=risk.BASE_RISK_RATIO, help="base per-trade risk ratio")
+    p.add_argument("--account", action="store_true",
+                   help="connect to your real CoinEx account (read-only balances/positions)")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -49,9 +51,10 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_scan_args(s)
     s.add_argument("--apply", action="store_true", help="apply signals to the paper portfolio")
 
-    lv = sub.add_parser("live", help="auto-refreshing live dashboard")
+    lv = sub.add_parser("live", help="auto-refreshing live dashboard (WebSocket prices)")
     _add_scan_args(lv)
-    lv.add_argument("--tick", type=int, default=3, help="live price refresh interval in seconds")
+    lv.add_argument("--tick", type=float, default=0.05,
+                    help="display refresh in seconds (WebSocket-fed; e.g. 0.01 = 10ms)")
     lv.add_argument("--every", type=int, default=30, help="full indicator rescan interval in seconds")
     lv.add_argument("--apply", action="store_true", help="apply signals each rescan")
 
@@ -59,6 +62,14 @@ def _build_parser() -> argparse.ArgumentParser:
 
     r = sub.add_parser("reset", help="reset the paper portfolio")
     r.add_argument("--capital", type=float, default=100_000.0, help="starting capital")
+
+    a = sub.add_parser("auth", help="connect/manage your CoinEx API credentials (read-only)")
+    a.add_argument("action", nargs="?", choices=["login", "status", "logout"], default="status")
+    a.add_argument("--access-id", help="CoinEx API access id (else prompted)")
+    a.add_argument("--secret", help="CoinEx API secret key (else prompted, hidden)")
+
+    ac = sub.add_parser("account", help="show your real CoinEx balances & positions (read-only)")
+    ac.add_argument("--source", choices=SOURCES, default="coinex")
 
     return p
 
@@ -78,6 +89,7 @@ def _do_scan(args, state_path: Path):
     result = run_scan(
         tickers, pf, period=args.period, interval=interval,
         apply_trades=args.apply, base_risk=args.risk, source=args.source, bars=args.bars,
+        use_account=args.account,
     )
     render(result)
     if args.apply:
@@ -89,23 +101,39 @@ def _do_live(args, state_path: Path):
 
     from . import data
     from .dashboard import build, console
+    from .stream import LivePriceStream
 
     tickers, interval = _resolve(args)
-    tick = max(1, args.tick)
-    every = max(tick, args.every)
+    tick = max(0.01, args.tick)               # honor down to 10ms
+    every = max(1.0, float(args.every))
+    is_crypto = args.source != "yahoo"
 
     def _scan():
         pf = Portfolio.load(state_path)
         result = run_scan(
             tickers, pf, period=args.period, interval=interval,
             apply_trades=args.apply, base_risk=args.risk, source=args.source, bars=args.bars,
+            use_account=args.account,
         )
         if args.apply:
             pf.save(state_path)
         return result
 
+    # Real-time price feed: WebSocket push for crypto, REST polling otherwise.
+    stream = LivePriceStream(tickers, segment=args.source).start() if is_crypto else None
+
+    def _live_quotes(fallback):
+        if stream is not None:
+            p = stream.prices()
+            if p:
+                return p
+        # WebSocket not warmed up yet (or yahoo): fall back to a REST snapshot.
+        return data.quotes(tickers, source=args.source) or fallback
+
+    feed = "WebSocket" if is_crypto else "REST"
     console.print(
-        f"[dim]Live dashboard — prices every {tick}s, full rescan every {every}s. Ctrl-C to exit.[/dim]"
+        f"[dim]Live dashboard — {feed} prices @ {tick*1000:.0f}ms, full rescan every "
+        f"{every:.0f}s. Ctrl-C to exit.[/dim]"
     )
     prev: dict[str, float] = {}
     try:
@@ -117,9 +145,7 @@ def _do_live(args, state_path: Path):
                     if time.monotonic() - last_scan >= every:
                         result = _scan()
                         last_scan = time.monotonic()
-                    else:
-                        # Cheap tick: refresh only live quotes between rescans.
-                        result.quotes = data.quotes(tickers, source=args.source) or result.quotes
+                    result.quotes = _live_quotes(result.quotes)
                     live.update(build(result, prev), refresh=True)
                     prev = {s: q.last for s, q in result.quotes.items()}
                     time.sleep(tick)
@@ -129,6 +155,9 @@ def _do_live(args, state_path: Path):
                 time.sleep(every)
     except KeyboardInterrupt:
         console.print("[dim]Live dashboard stopped.[/dim]")
+    finally:
+        if stream is not None:
+            stream.stop()
 
 
 def _do_status(state_path: Path):
@@ -154,6 +183,53 @@ def _do_status(state_path: Path):
         console.print("  [dim]no open positions[/dim]")
 
 
+def _do_auth(args):
+    import getpass
+
+    from . import auth
+    from .dashboard import console
+
+    if args.action == "status":
+        a, _ = auth.load_credentials()
+        if a:
+            console.print(f"[green]🔐 Connected[/green] as access id [bold]{a[:6]}…{a[-4:]}[/bold] "
+                          f"[dim](source: env or {auth.CRED_PATH})[/dim]")
+        else:
+            console.print("[yellow]Not connected.[/yellow] Run [bold]bellwether auth login[/bold] "
+                          "with a READ-ONLY CoinEx API key.")
+        return
+    if args.action == "logout":
+        console.print("[green]Removed stored credentials.[/green]" if auth.remove_credentials()
+                      else "[dim]No stored credentials to remove.[/dim]")
+        return
+    # login
+    console.print("[bold cyan]Connect CoinEx (read-only).[/bold cyan] "
+                  "[dim]Create a key with VIEW permission only; never share your secret.[/dim]")
+    access = args.access_id or input("Access ID: ").strip()
+    secret = args.secret or getpass.getpass("Secret Key (hidden): ").strip()
+    if not access or not secret:
+        console.print("[red]Both access id and secret are required.[/red]")
+        return
+    path = auth.save_credentials(access, secret)
+    console.print(f"[green]Saved to {path}[/green] [dim](chmod 600). Verifying…[/dim]")
+    snap = auth.account_snapshot()
+    if snap.get("error"):
+        console.print(f"[yellow]Stored, but a test call failed:[/yellow] {snap['error']}")
+    else:
+        console.print(f"[green]✓ Verified.[/green] Futures USDT equity ≈ "
+                      f"${snap.get('equity_usdt', 0):,.2f}")
+
+
+def _do_account(args, state_path: Path):
+    from . import auth
+    from .dashboard import account_panel, console
+
+    if not auth.has_credentials():
+        console.print("[yellow]Not connected.[/yellow] Run [bold]bellwether auth login[/bold] first.")
+        return
+    console.print(account_panel(auth.account_snapshot()))
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
     state_path = Path(getattr(args, "state", DEFAULT_STATE_PATH))
@@ -174,6 +250,10 @@ def main(argv: list[str] | None = None) -> int:
         _do_live(args, state_path)
     elif args.command == "scan":
         _do_scan(args, state_path)
+    elif args.command == "auth":
+        _do_auth(args)
+    elif args.command == "account":
+        _do_account(args, state_path)
     else:
         return 1
     return 0

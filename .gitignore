@@ -9,9 +9,11 @@ dist/
 venv/
 env/
 
-# Bellwether paper-portfolio state (machine-local)
+# Bellwether paper-portfolio state + API credentials (machine-local, NEVER commit)
 .bellwether/
 *.portfolio.json
+credentials.json
+.env
 
 # OS / editor
 .DS_Store

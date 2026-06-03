@@ -35,14 +35,40 @@ Then it's just:
 
 ```bash
 bellwether                              # default: scan top crypto on CoinEx
-bellwether live                         # LIVE dashboard: prices tick every ~3s, full rescan every 30s
-bellwether live --tick 2 --every 20     # tune the live price + rescan cadence
+bellwether live                         # LIVE dashboard: real-time WebSocket prices + ensemble signals
+bellwether live --tick 0.01             # repaint every 10ms off the live WebSocket feed
 bellwether scan --source coinex BTCUSDT ETHUSDT SOLUSDT
 bellwether scan --source yahoo NVDA AAPL MSFT SPY     # stocks
 bellwether scan --apply BTCUSDT         # apply signals to the paper portfolio
 bellwether status                       # inspect the paper book
 bellwether reset --capital 250000
 ```
+
+## 🔐 Connect your CoinEx account (read-only)
+
+```bash
+bellwether auth login          # paste a READ-ONLY (VIEW) API key + secret
+bellwether account             # show real balances + open positions
+bellwether scan --account      # dashboard equity reflects your real futures balance
+bellwether auth logout
+```
+
+Credentials live in env vars (`COINEX_ACCESS_ID` / `COINEX_SECRET_KEY`) or
+`~/.bellwether/credentials.json` (chmod 600, gitignored). Requests are signed
+with HMAC-SHA256 per CoinEx v2.
+
+> **Safety boundary:** Bellwether's account access is **read-only** — it can view
+> balances/positions but **cannot place, modify, or cancel orders**. Live order
+> execution is deliberately *not* wired in; it would be a separate, explicit
+> opt-in. Use a key with **VIEW permission only**.
+
+## ⚡ Real-time prices (WebSocket)
+
+`bellwether live` opens a persistent CoinEx **WebSocket** and the exchange pushes
+`state.update` ticks as the market moves — so prices are millisecond-fresh
+without hammering REST. The dashboard reads the latest in-memory price each
+frame, so `--tick 0.01` repaints at ~10ms with no per-frame network cost. Stocks
+(`--source yahoo`) fall back to REST polling.
 
 ## 🌍 Data sources (real prices, never fabricated)
 
