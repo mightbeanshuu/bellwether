@@ -22,7 +22,7 @@ MAX_DAILY_LOSS = 0.02        # 2% hard daily drawdown limit
 class SizingResult:
     risk_ratio: float
     risk_capital: float       # dollars put at risk
-    units: int
+    units: float              # whole shares (step=1) or fractional (e.g. BTC)
     notional: float           # units * entry
     per_unit_risk: float      # |entry - stop|
 
@@ -40,11 +40,27 @@ def scaled_risk_ratio(atr_pct: float, base: float = BASE_RISK_RATIO) -> float:
     return max(MIN_RISK_RATIO, round(ratio, 4))
 
 
+def _floor_to_step(value: float, step: float) -> float:
+    """Floor `value` to the nearest multiple of `step` (the lot/contract size)."""
+    if step <= 0:
+        return value
+    units = (value // step) * step
+    # Re-round to step's decimal precision to avoid float fuzz (e.g. 0.30000000004).
+    decimals = max(0, len(f"{step:.10f}".rstrip("0").split(".")[-1]))
+    return round(units, decimals)
+
+
 def position_size(
-    capital: float, entry: float, stop: float, atr_pct: float, base_risk: float = BASE_RISK_RATIO
+    capital: float,
+    entry: float,
+    stop: float,
+    atr_pct: float,
+    base_risk: float = BASE_RISK_RATIO,
+    step: float = 1.0,
 ) -> SizingResult:
     """Compute a volatility-adjusted position size.
 
+    `step` is the tradable lot size: 1.0 for whole shares, e.g. 0.0001 for BTC.
     Returns zero units when the stop is degenerate (entry == stop) rather than
     dividing by zero — a missing/equal stop is treated as "no valid risk frame."
     """
@@ -52,12 +68,12 @@ def position_size(
     risk_capital = capital * risk_ratio
     per_unit_risk = abs(entry - stop)
     if per_unit_risk <= 0:
-        return SizingResult(risk_ratio, risk_capital, 0, 0.0, 0.0)
+        return SizingResult(risk_ratio, risk_capital, 0.0, 0.0, 0.0)
 
-    units = int(risk_capital // per_unit_risk)
+    units = _floor_to_step(risk_capital / per_unit_risk, step)
     # Never let a single position's notional exceed the account (no leverage).
     if units * entry > capital:
-        units = int(capital // entry)
+        units = _floor_to_step(capital / entry, step)
     return SizingResult(
         risk_ratio=risk_ratio,
         risk_capital=round(risk_capital, 2),

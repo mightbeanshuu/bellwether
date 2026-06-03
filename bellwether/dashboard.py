@@ -1,85 +1,207 @@
-"""Terminal dashboard rendering — machine-readable, no conversational filler."""
+"""Beautiful terminal rendering powered by `rich`.
+
+Renders a ScanResult as a polished dashboard: a header banner with portfolio
+health, a per-asset signal table, and an expandable detail panel per actionable
+asset (regime, ensemble vote breakdown, and the risk-managed execution command).
+"""
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from rich.align import Align
+from rich.box import HEAVY, ROUNDED, SIMPLE
+from rich.columns import Columns
+from rich.console import Console, Group
+from rich.panel import Panel
+from rich.table import Table
+from rich.text import Text
 
 from . import __version__
-from .regime import Regime
-from .risk import SizingResult
-from .strategy import Signal
 
-RULE = "=" * 80
-THIN = "-" * 80
+console = Console()
 
-
-def _ts() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+ACTION_STYLE = {"BUY": "bold green", "SELL": "bold red", "HOLD": "bold yellow"}
+ACTION_ICON = {"BUY": "▲ BUY ", "SELL": "▼ SELL", "HOLD": "■ HOLD"}
 
 
-def header(portfolio_value: float, daily_pnl_pct: float, frozen: bool) -> str:
-    status = "FROZEN" if frozen else "ACTIVE"
-    sign = "+" if daily_pnl_pct >= 0 else ""
-    return (
-        f"{RULE}\n"
-        f"BELLWETHER_v{__version__} // {status} // "
-        f"PORTFOLIO_VALUE: ${portfolio_value:,.2f} // "
-        f"DAILY_P&L: {sign}{daily_pnl_pct*100:.2f}%\n"
-        f"{RULE}"
+# --------------------------------------------------------------------------
+# Formatting helpers (reused by engine logs too)
+# --------------------------------------------------------------------------
+def fmt_price(p: float) -> str:
+    if p == 0:
+        return "$0.00"
+    if abs(p) >= 1:
+        return f"${p:,.2f}"
+    if abs(p) >= 0.01:
+        return f"${p:,.4f}"
+    return f"${p:,.6f}"
+
+
+def fmt_units(u: float) -> str:
+    if u == int(u):
+        return f"{int(u):,}"
+    return f"{u:,.6f}".rstrip("0").rstrip(".")
+
+
+def _conviction_bar(conviction: float, width: int = 10) -> str:
+    filled = round(conviction * width)
+    return "█" * filled + "░" * (width - filled)
+
+
+def _score_bar(score: float, width: int = 11) -> Text:
+    """A centered -1..+1 gauge: red left (short), green right (long)."""
+    half = width // 2
+    pos = int(round(_clamp(score) * half))
+    cells = []
+    for i in range(-half, half + 1):
+        if i == 0:
+            cells.append(("│", "dim"))
+        elif 0 < i <= pos:
+            cells.append(("▰", "green"))
+        elif pos <= i < 0:
+            cells.append(("▰", "red"))
+        else:
+            cells.append(("▱", "dim"))
+    t = Text()
+    for ch, style in cells:
+        t.append(ch, style=style)
+    return t
+
+
+def _clamp(x, lo=-1.0, hi=1.0):
+    return max(lo, min(hi, x))
+
+
+# --------------------------------------------------------------------------
+# Header
+# --------------------------------------------------------------------------
+def header_panel(result) -> Panel:
+    pnl = result.daily_pnl_pct
+    pnl_style = "green" if pnl >= 0 else "red"
+    sign = "+" if pnl >= 0 else ""
+    status = Text("● FROZEN", style="bold red") if result.frozen else Text("● ACTIVE", style="bold green")
+
+    line = Text()
+    line.append("🐏 BELLWETHER ", style="bold cyan")
+    line.append(f"v{__version__}  ", style="dim")
+    line.append_text(status)
+    line.append(f"   SOURCE: {result.source}/{result.interval}   ", style="dim")
+    line.append("EQUITY: ", style="dim")
+    line.append(f"${result.portfolio_value:,.2f}", style="bold white")
+    line.append("   DAILY P&L: ", style="dim")
+    line.append(f"{sign}{pnl*100:.2f}%", style=f"bold {pnl_style}")
+
+    sub = Text(result.timestamp, style="dim italic")
+    return Panel(Group(Align.center(line), Align.center(sub)), box=HEAVY, border_style="cyan", padding=(0, 1))
+
+
+# --------------------------------------------------------------------------
+# Summary table
+# --------------------------------------------------------------------------
+def summary_table(result) -> Table:
+    t = Table(box=ROUNDED, expand=True, border_style="grey37", header_style="bold white on grey23")
+    t.add_column("Ticker", style="bold", no_wrap=True)
+    t.add_column("Price", justify="right")
+    t.add_column("Regime")
+    t.add_column("Signal", justify="center")
+    t.add_column("Score", justify="center")
+    t.add_column("Conv.", justify="left")
+    t.add_column("Size", justify="right")
+
+    for r in result.reports:
+        if not r.ok:
+            t.add_row(r.ticker, "—", Text("DATA_GAP", style="bold red"),
+                      Text("SKIP", style="dim"), "—", "—", "—")
+            continue
+        sig = r.signal
+        act_style = ACTION_STYLE[sig.action]
+        regime_txt = Text(r.regime.label, style="white")
+        regime_txt.append(f"\nADX {r.regime.adx:.0f} · ATR {r.regime.atr_pct*100:.2f}%", style="dim")
+        conv = f"{_conviction_bar(sig.conviction)} {sig.conviction*100:.0f}%"
+        t.add_row(
+            r.ticker,
+            fmt_price(r.price),
+            regime_txt,
+            Text(ACTION_ICON[sig.action], style=act_style),
+            _score_bar(sig.score),
+            Text(conv, style=act_style),
+            f"{fmt_units(r.sizing.units)}",
+        )
+    return t
+
+
+# --------------------------------------------------------------------------
+# Per-asset detail panels (only for actionable BUY/SELL)
+# --------------------------------------------------------------------------
+def _votes_table(sig) -> Table:
+    vt = Table(box=SIMPLE, show_header=True, header_style="dim", expand=True, padding=(0, 1))
+    vt.add_column("Voter", style="cyan", no_wrap=True)
+    vt.add_column("Vote", justify="center")
+    vt.add_column("Wt", justify="right", style="dim")
+    vt.add_column("Read", style="white")
+    for v in sorted(sig.votes, key=lambda x: abs(x.value) * x.weight, reverse=True):
+        style = "green" if v.value > 0.05 else "red" if v.value < -0.05 else "dim"
+        vt.add_row(v.name, Text(f"{v.value:+.2f}", style=style), f"{v.weight:.2f}", v.note)
+    return vt
+
+
+def detail_panel(r, unit_label: str) -> Panel:
+    sig, sz = r.signal, r.sizing
+    act_style = ACTION_STYLE[sig.action]
+
+    cmd = Table.grid(padding=(0, 2))
+    cmd.add_column(style="dim", justify="right")
+    cmd.add_column(style="bold white")
+    cmd.add_row("ORDER", Text(sig.action, style=act_style))
+    cmd.add_row("ENTRY", fmt_price(sig.entry))
+    cmd.add_row("STOP", Text(fmt_price(sig.stop), style="red"))
+    cmd.add_row("TARGET", Text(fmt_price(sig.take_profit), style="green"))
+    cmd.add_row("SIZE", f"{fmt_units(sz.units)} {unit_label}")
+    cmd.add_row("RISK", f"{sz.risk_ratio*100:.2f}%  (${sz.risk_capital:,.0f})")
+    cmd.add_row("NOTIONAL", f"${sz.notional:,.2f}")
+
+    body = Group(
+        Text(sig.framework, style="italic cyan"),
+        Text(sig.rationale, style="white"),
+        Text(""),
+        Columns([_votes_table(sig), Panel(cmd, title="execution", box=ROUNDED,
+                                          border_style=act_style.split()[-1], padding=(0, 1))],
+                expand=True),
     )
+    if r.filled:
+        body = Group(body, Text(f"→ {r.filled}", style="bold magenta"))
+
+    title = Text()
+    title.append(f" {r.ticker} ", style=f"{act_style} reverse")
+    title.append(f"  {fmt_price(r.price)}  ", style="bold white")
+    title.append(f"score {sig.score:+.2f}", style="dim")
+    return Panel(body, title=title, box=ROUNDED, border_style=act_style.split()[-1], padding=(1, 1))
 
 
-def asset_block(ticker: str, price: float, regime: Regime, signal: Signal, sizing: SizingResult) -> str:
-    lines = [
-        "",
-        "[MARKET SCAN RECONNAISSANCE]",
-        f"Target Ticker: {ticker}",
-        f"Current Price: ${price:,.2f}",
-        f"Market Regime: {regime.label} "
-        f"(ADX {regime.adx:.1f}, ATR {regime.atr_pct*100:.2f}%, Vol: {regime.volatility})",
-        "",
-        "[ALGORITHM ENGINE SELECTION]",
-        f"Selected Framework: {signal.framework}",
-        f"Reasoning: {signal.rationale}",
-        f"Conviction: {signal.conviction:.2f}",
-        "",
-        "[RISK MITIGATION SPECIFICATIONS]",
-        f"Calculated Risk Ratio: {sizing.risk_ratio:.4f} ({sizing.risk_ratio*100:.2f}% portfolio risk)",
-        f"Risk Capital: ${sizing.risk_capital:,.2f}",
-        f"Calculated Stop-Loss: ${signal.stop:,.2f}",
-        f"Calculated Take-Profit: ${signal.take_profit:,.2f}",
-        f"Target Position Size: {sizing.units} units (notional ${sizing.notional:,.2f})",
-        "",
-        "[EXECUTION COMMAND]",
-        THIN,
-        f"ORDER_SIGNAL : {signal.action}",
-        f"TICKER       : {ticker}",
-        f"VOLUME       : {sizing.units} SHARES",
-        f"ENTRY_LIMIT  : ${signal.entry:,.2f}",
-        f"TIMESTAMP    : {_ts()}",
-        THIN,
-    ]
-    return "\n".join(lines)
+# --------------------------------------------------------------------------
+# Top-level render
+# --------------------------------------------------------------------------
+def build(result) -> Group:
+    parts = [header_panel(result)]
+    if result.frozen:
+        parts.append(Panel(
+            Text("CIRCUIT BREAKER TRIGGERED — daily loss limit breached. "
+                 "All new BUYs frozen for the session (SELL/HOLD only).",
+                 style="bold red", justify="center"),
+            box=HEAVY, border_style="red"))
+    for log in result.exit_logs:
+        parts.append(Text(f"  ⚑ EXIT  {log}", style="bold magenta"))
+
+    parts.append(summary_table(result))
+
+    actionable = [r for r in result.reports if r.ok and r.signal.action in ("BUY", "SELL")]
+    for r in actionable:
+        parts.append(detail_panel(r, result.unit_label))
+
+    if not actionable:
+        parts.append(Align.center(Text("No actionable signals this pass — standing aside.", style="dim italic")))
+
+    return Group(*parts)
 
 
-def error_block(ticker: str, message: str) -> str:
-    return (
-        "\n[MARKET SCAN RECONNAISSANCE]\n"
-        f"Target Ticker: {ticker}\n"
-        f"[ERROR: DATA_GAP] {message}\n"
-        "ACTION: Asset skipped; advancing to next verified stream."
-    )
-
-
-def circuit_breaker_block(daily_pnl_pct: float, limit: float) -> str:
-    return (
-        f"\n{RULE}\n"
-        f"[CRITICAL: CIRCUIT_BREAKER_TRIGGERED] "
-        f"Daily P&L {daily_pnl_pct*100:.2f}% breached -{limit*100:.1f}% limit.\n"
-        f"All BUY actions FROZEN for the session. SELL/HOLD only.\n"
-        f"{RULE}"
-    )
-
-
-def footer() -> str:
-    return "\nSTATUS: Scan complete. Awaiting next data vector stream..."
+def render(result, target_console: Console | None = None) -> None:
+    (target_console or console).print(build(result))

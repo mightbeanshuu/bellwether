@@ -73,6 +73,77 @@ def bollinger_percent_b(close: pd.Series, period: int = 20, num_std: float = 2.0
     return (close - lower) / width
 
 
+def macd(
+    close: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9
+) -> tuple[pd.Series, pd.Series, pd.Series]:
+    """MACD line, signal line, histogram."""
+    macd_line = ema(close, fast) - ema(close, slow)
+    signal_line = macd_line.ewm(span=signal, adjust=False, min_periods=signal).mean()
+    hist = macd_line - signal_line
+    return macd_line, signal_line, hist
+
+
+def stochastic(
+    high: pd.Series, low: pd.Series, close: pd.Series, k_period: int = 14, d_period: int = 3
+) -> tuple[pd.Series, pd.Series]:
+    """Stochastic oscillator %K and %D."""
+    lowest = low.rolling(k_period, min_periods=k_period).min()
+    highest = high.rolling(k_period, min_periods=k_period).max()
+    rng = (highest - lowest).replace(0.0, np.nan)
+    percent_k = 100 * (close - lowest) / rng
+    percent_d = percent_k.rolling(d_period, min_periods=d_period).mean()
+    return percent_k, percent_d
+
+
+def donchian(high: pd.Series, low: pd.Series, period: int = 20) -> tuple[pd.Series, pd.Series]:
+    """Donchian channel (lower, upper) — the classic Turtle breakout bands.
+
+    Uses the *prior* `period` bars (shifted) so the current bar can be tested for
+    a genuine breakout beyond the established range.
+    """
+    upper = high.rolling(period, min_periods=period).max().shift(1)
+    lower = low.rolling(period, min_periods=period).min().shift(1)
+    return lower, upper
+
+
+def supertrend(
+    high: pd.Series, low: pd.Series, close: pd.Series, period: int = 10, multiplier: float = 3.0
+) -> tuple[pd.Series, pd.Series]:
+    """Supertrend line and direction (+1 uptrend, -1 downtrend).
+
+    Faithful to the canonical implementation used across freqtrade strategies:
+    ATR-banded trailing stop that flips with price. Returns (line, direction).
+    """
+    atr_ = atr(high, low, close, period)
+    hl2 = (high + low) / 2
+    upper = (hl2 + multiplier * atr_).to_numpy()
+    lower = (hl2 - multiplier * atr_).to_numpy()
+    close_arr = close.to_numpy()
+    n = len(close_arr)
+
+    final_upper = np.full(n, np.nan)
+    final_lower = np.full(n, np.nan)
+    st = np.full(n, np.nan)
+    direction = np.full(n, 1.0)
+
+    for i in range(1, n):
+        if np.isnan(upper[i]):
+            continue
+        prev_fu = final_upper[i - 1]
+        prev_fl = final_lower[i - 1]
+        final_upper[i] = upper[i] if (np.isnan(prev_fu) or upper[i] < prev_fu or close_arr[i - 1] > prev_fu) else prev_fu
+        final_lower[i] = lower[i] if (np.isnan(prev_fl) or lower[i] > prev_fl or close_arr[i - 1] < prev_fl) else prev_fl
+
+        prev_st = st[i - 1]
+        if np.isnan(prev_st) or prev_st == prev_fu:
+            st[i] = final_upper[i] if close_arr[i] <= final_upper[i] else final_lower[i]
+        else:
+            st[i] = final_lower[i] if close_arr[i] >= final_lower[i] else final_upper[i]
+        direction[i] = 1.0 if close_arr[i] > st[i] else -1.0
+
+    return pd.Series(st, index=close.index), pd.Series(direction, index=close.index)
+
+
 def adx(high: pd.Series, low: pd.Series, close: pd.Series, period: int = 14) -> pd.Series:
     """Average Directional Index — trend *strength* (not direction)."""
     up_move = high.diff()

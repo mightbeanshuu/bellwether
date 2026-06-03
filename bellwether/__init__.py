@@ -5,5 +5,5 @@ next: the original "leading indicator." This package turns real market data
 into actionable, risk-managed BUY / SELL / HOLD signals from the terminal.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 __engine__ = "BELLWETHER_ENGINE"
