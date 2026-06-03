@@ -24,9 +24,16 @@ echo "  • installing dependencies …"
 # 2) launcher on PATH
 mkdir -p "$BIN_DIR"
 LAUNCHER="$BIN_DIR/bellwether"
+# Prefer pip's console-script entry point: it runs with a clean sys.path, so it
+# is never shadowed by a same-named folder in the current directory (unlike
+# `python -m bellwether`, which injects cwd onto the path).
 cat > "$LAUNCHER" <<EOF
 #!/usr/bin/env bash
-exec "$VENV/bin/python" -m bellwether "\$@"
+if [ -x "$VENV/bin/bellwether" ]; then
+  exec "$VENV/bin/bellwether" "\$@"
+else
+  exec "$VENV/bin/python" -m bellwether "\$@"
+fi
 EOF
 chmod +x "$LAUNCHER"
 echo "  • launcher installed at $LAUNCHER"
